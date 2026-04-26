@@ -1,179 +1,217 @@
-﻿// Core/SyncOrchestrator.cs
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using SyncLibrary.Abstractions;
-using System.Collections.Concurrent;
+using SyncLib.Abstractions;
+using SyncLib.Core.Diagnostics;
 
-namespace SyncLibrary.Core;
+namespace SyncLib.Core;
 
-public class SyncOrchestrator : BackgroundService, ISyncOrchestrator
+/// <summary>
+/// Hosted service that runs each registered provider's sync on its configured interval.
+/// </summary>
+public sealed class SyncOrchestrator : BackgroundService, ISyncOrchestrator
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<SyncOrchestrator> _logger;
-    private readonly ConcurrentDictionary<string, SyncJob> _syncJobs;
-    private readonly ConcurrentDictionary<string, CircuitBreaker> _circuitBreakers;
+    private readonly IReadOnlyDictionary<string, SyncJobRegistration> _jobs;
+    private readonly IReadOnlyDictionary<string, ISyncConfiguration> _configurations;
+    private readonly ConcurrentDictionary<string, CircuitBreaker> _breakers = new(StringComparer.OrdinalIgnoreCase);
 
-    public SyncOrchestrator(IServiceProvider serviceProvider, ILogger<SyncOrchestrator> logger)
+    /// <summary>Constructs the orchestrator from DI-registered jobs and configurations.</summary>
+    public SyncOrchestrator(
+        IServiceProvider serviceProvider,
+        IEnumerable<SyncJobRegistration> registrations,
+        IEnumerable<ISyncConfiguration> configurations,
+        ILogger<SyncOrchestrator> logger)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
-        _syncJobs = new ConcurrentDictionary<string, SyncJob>();
-        _circuitBreakers = new ConcurrentDictionary<string, CircuitBreaker>();
-    }
 
-    public void RegisterSyncJob<TData, TEntity>(
-        ISyncConfiguration configuration,
-        ISyncErrorHandler? errorHandler = null)
-        where TData : class
-        where TEntity : class, IEntity, new()
-    {
-        var job = new SyncJob
+        _configurations = configurations.ToDictionary(c => c.ProviderName, StringComparer.OrdinalIgnoreCase);
+        _jobs = registrations.ToDictionary(r => r.ProviderName, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var providerName in _jobs.Keys)
         {
-            Configuration = configuration,
-            ErrorHandler = errorHandler,
-            DataType = typeof(TData),
-            EntityType = typeof(TEntity),
-            ExecuteAsync = async (cancellationToken) =>
+            if (!_configurations.ContainsKey(providerName))
             {
-                using var scope = _serviceProvider.CreateScope();
-                var dataProvider = scope.ServiceProvider.GetRequiredService<ISyncDataProvider<TData>>();
-                var repository = scope.ServiceProvider.GetRequiredService<ISyncRepository<TEntity>>();
-                var mapper = scope.ServiceProvider.GetRequiredService<ISyncMapper<TData, TEntity>>();
-
-                var circuitBreaker = _circuitBreakers.GetOrAdd(configuration.ProviderName,
-                    _ => new CircuitBreaker(configuration.FailureThreshold, configuration.CircuitBreakerTimeout, _logger));
-
-                await ExecuteSyncWithCircuitBreakerAsync(
-                    dataProvider, repository, mapper, configuration,
-                    circuitBreaker, errorHandler, cancellationToken);
+                throw new InvalidOperationException(
+                    $"Sync provider '{providerName}' is registered but no ISyncConfiguration with that ProviderName was found.");
             }
-        };
-
-        _syncJobs[configuration.ProviderName] = job;
-        _logger.LogInformation("Registered sync job for provider: {ProviderName}", configuration.ProviderName);
+        }
     }
 
-    private async Task ExecuteSyncWithCircuitBreakerAsync<TData, TEntity>(
-        ISyncDataProvider<TData> dataProvider,
-        ISyncRepository<TEntity> repository,
-        ISyncMapper<TData, TEntity> mapper,
-        ISyncConfiguration configuration,
-        CircuitBreaker circuitBreaker,
-        ISyncErrorHandler? errorHandler,
-        CancellationToken cancellationToken)
-        where TData : class
-        where TEntity : class, IEntity, new()
+    /// <inheritdoc />
+    public IReadOnlyCollection<string> RegisteredProviders => _jobs.Keys.ToArray();
+
+    /// <inheritdoc />
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (circuitBreaker.IsOpen)
+        if (_jobs.Count == 0)
         {
-            _logger.LogWarning("Circuit breaker is open for {ProviderName}. Skipping sync.", configuration.ProviderName);
-            await errorHandler?.OnSyncErrorAsync(configuration.ProviderName,
-                new CircuitBreakerOpenException("Circuit breaker is open"), 0, cancellationToken)!;
+            _logger.LogInformation("SyncOrchestrator started with no registered providers.");
+            return Task.CompletedTask;
+        }
+
+        var loops = _jobs.Values.Select(job => RunProviderLoopAsync(job, _configurations[job.ProviderName], stoppingToken));
+        return Task.WhenAll(loops);
+    }
+
+    private async Task RunProviderLoopAsync(SyncJobRegistration job, ISyncConfiguration config, CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("Starting sync loop for {ProviderName} every {Interval}", job.ProviderName, config.SyncInterval);
+
+        // Run immediately, then on interval.
+        try
+        {
+            await ExecuteOnceAsync(job, config, stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
             return;
         }
 
-        for (int retry = 0; retry <= configuration.MaxRetryAttempts; retry++)
+        using var timer = new PeriodicTimer(config.SyncInterval);
+        try
         {
-            try
-            {
-                var startTime = DateTime.UtcNow;
-                var lastSyncTime = await repository.GetLastSyncTimeAsync(cancellationToken);
-
-                IEnumerable<TData> data;
-                if (lastSyncTime.HasValue)
-                {
-                    data = await dataProvider.FetchDataAsync(lastSyncTime, cancellationToken);
-                }
-                else
-                {
-                    data = await dataProvider.FetchDataAsync(cancellationToken);
-                }
-
-                var entities = mapper.MapToEntities(data);
-                await repository.AddOrUpdateBatchAsync(entities, cancellationToken);
-
-                var duration = DateTime.UtcNow - startTime;
-                circuitBreaker.RecordSuccess();
-                await (errorHandler?.OnSyncSuccessAsync(configuration.ProviderName,
-                    entities.Count(), duration, cancellationToken) ?? Task.CompletedTask);
-
-                _logger.LogInformation("Sync completed for {ProviderName}: {Count} records in {Duration}",
-                    configuration.ProviderName, entities.Count(), duration);
-                return;
-            }
-            catch (Exception ex) when (retry < configuration.MaxRetryAttempts)
-            {
-                var delay = configuration.RetryDelayBase * Math.Pow(2, retry);
-                _logger.LogWarning(ex, "Sync failed for {ProviderName} (Attempt {Retry}/{MaxRetries}). Retrying in {Delay}ms",
-                    configuration.ProviderName, retry + 1, configuration.MaxRetryAttempts, delay);
-
-                await Task.Delay(delay, cancellationToken);
-                await (errorHandler?.OnSyncErrorAsync(configuration.ProviderName, ex, retry + 1, cancellationToken) ?? Task.CompletedTask);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Sync failed permanently for {ProviderName}", configuration.ProviderName);
-                circuitBreaker.RecordFailure();
-                await (errorHandler?.OnSyncErrorAsync(configuration.ProviderName, ex, configuration.MaxRetryAttempts + 1, cancellationToken) ?? Task.CompletedTask);
-                throw;
-            }
-        }
-    }
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        var timers = new List<Timer>();
-
-        foreach (var job in _syncJobs.Values)
-        {
-            var timer = new Timer(async _ =>
+            while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
             {
                 try
                 {
-                    await job.ExecuteAsync(stoppingToken);
+                    await ExecuteOnceAsync(job, config, stoppingToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Unhandled exception in sync job for {ProviderName}", job.Configuration.ProviderName);
+                    // Already logged inside ExecuteOnceAsync; swallow so the loop survives.
+                    _logger.LogDebug(ex, "Run loop for {ProviderName} continued past handled error.", job.ProviderName);
                 }
-            }, null, TimeSpan.Zero, job.Configuration.SyncInterval);
-
-            timers.Add(timer);
-        }
-
-        try
-        {
-            await Task.Delay(Timeout.Infinite, stoppingToken);
-        }
-        finally
-        {
-            foreach (var timer in timers)
-            {
-                await timer.DisposeAsync();
             }
         }
-    }
-
-    public async Task TriggerManualSyncAsync(string providerName, CancellationToken cancellationToken = default)
-    {
-        if (_syncJobs.TryGetValue(providerName, out var job))
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            _logger.LogInformation("Manual sync triggered for {ProviderName}", providerName);
-            await job.ExecuteAsync(cancellationToken);
-        }
-        else
-        {
-            throw new ArgumentException($"No sync job registered for provider: {providerName}");
+            // graceful shutdown
         }
     }
 
-    private class SyncJob
+    /// <inheritdoc />
+    public Task TriggerManualSyncAsync(string providerName, CancellationToken cancellationToken = default)
     {
-        public ISyncConfiguration Configuration { get; set; } = null!;
-        public ISyncErrorHandler? ErrorHandler { get; set; }
-        public Type DataType { get; set; } = null!;
-        public Type EntityType { get; set; } = null!;
-        public Func<CancellationToken, Task> ExecuteAsync { get; set; } = null!;
+        if (!_jobs.TryGetValue(providerName, out var job))
+        {
+            throw new ArgumentException($"No sync provider registered with name '{providerName}'.", nameof(providerName));
+        }
+        var config = _configurations[providerName];
+        _logger.LogInformation("Manual sync triggered for {ProviderName}", providerName);
+        return ExecuteOnceAsync(job, config, cancellationToken);
+    }
+
+    private async Task ExecuteOnceAsync(SyncJobRegistration job, ISyncConfiguration config, CancellationToken cancellationToken)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var sp = scope.ServiceProvider;
+        var stateStore = sp.GetRequiredService<ISyncStateStore>();
+        var errorHandler = sp.GetService<ISyncErrorHandler>();
+
+        using var activity = SyncDiagnostics.ActivitySource.StartActivity("synclib.sync", ActivityKind.Internal);
+        activity?.SetTag("sync.provider", job.ProviderName);
+
+        var breaker = _breakers.GetOrAdd(job.ProviderName,
+            _ => new CircuitBreaker(config.FailureThreshold, config.CircuitBreakerTimeout, _logger));
+
+        if (config.EnableCircuitBreaker && breaker.IsOpen)
+        {
+            _logger.LogWarning("Skipping sync for {ProviderName}: circuit breaker is open.", job.ProviderName);
+            await stateStore.RecordSkippedAsync(job.ProviderName, DateTime.UtcNow, "Circuit breaker open", cancellationToken).ConfigureAwait(false);
+            SyncDiagnostics.SyncSkipped.Add(1, new KeyValuePair<string, object?>("sync.provider", job.ProviderName));
+            activity?.SetTag("sync.status", "skipped");
+            if (errorHandler is not null)
+            {
+                await errorHandler.OnSyncErrorAsync(job.ProviderName,
+                    new CircuitBreakerOpenException("Circuit breaker is open"), 0, cancellationToken).ConfigureAwait(false);
+            }
+            return;
+        }
+
+        var startedAt = DateTime.UtcNow;
+        await stateStore.RecordRunStartedAsync(job.ProviderName, startedAt, cancellationToken).ConfigureAwait(false);
+
+        var stopwatch = Stopwatch.StartNew();
+        Exception? lastError = null;
+
+        for (var attempt = 0; attempt <= config.MaxRetryAttempts; attempt++)
+        {
+            try
+            {
+                var recordCount = await job.ExecuteAsync(sp, cancellationToken).ConfigureAwait(false);
+                stopwatch.Stop();
+
+                breaker.RecordSuccess();
+                await stateStore.RecordSuccessAsync(job.ProviderName, startedAt, stopwatch.Elapsed, recordCount, cancellationToken).ConfigureAwait(false);
+
+                var providerTag = new KeyValuePair<string, object?>("sync.provider", job.ProviderName);
+                SyncDiagnostics.SyncDuration.Record(stopwatch.Elapsed.TotalMilliseconds, providerTag);
+                SyncDiagnostics.SyncSuccesses.Add(1, providerTag);
+                SyncDiagnostics.SyncRecords.Add(recordCount, providerTag);
+
+                activity?.SetTag("sync.records", recordCount);
+                activity?.SetTag("sync.status", "succeeded");
+
+                if (errorHandler is not null)
+                {
+                    await errorHandler.OnSyncSuccessAsync(job.ProviderName, recordCount, stopwatch.Elapsed, cancellationToken).ConfigureAwait(false);
+                }
+
+                _logger.LogInformation("Sync completed for {ProviderName}: {Count} records in {Duration}",
+                    job.ProviderName, recordCount, stopwatch.Elapsed);
+                return;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lastError = ex;
+                if (errorHandler is not null)
+                {
+                    await errorHandler.OnSyncErrorAsync(job.ProviderName, ex, attempt + 1, cancellationToken).ConfigureAwait(false);
+                }
+
+                if (attempt < config.MaxRetryAttempts)
+                {
+                    var delay = TimeSpan.FromMilliseconds(config.RetryDelayBase.TotalMilliseconds * Math.Pow(2, attempt));
+                    _logger.LogWarning(ex, "Sync failed for {ProviderName} (attempt {Attempt}/{MaxRetries}). Retrying in {Delay}.",
+                        job.ProviderName, attempt + 1, config.MaxRetryAttempts, delay);
+                    try
+                    {
+                        await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                }
+            }
+        }
+
+        // Exhausted retries.
+        stopwatch.Stop();
+        breaker.RecordFailure();
+        await stateStore.RecordFailureAsync(job.ProviderName, startedAt, stopwatch.Elapsed, lastError!, cancellationToken).ConfigureAwait(false);
+
+        var failProviderTag = new KeyValuePair<string, object?>("sync.provider", job.ProviderName);
+        SyncDiagnostics.SyncDuration.Record(stopwatch.Elapsed.TotalMilliseconds, failProviderTag);
+        SyncDiagnostics.SyncFailures.Add(1, failProviderTag);
+
+        activity?.SetTag("sync.status", "failed");
+        activity?.SetStatus(ActivityStatusCode.Error, lastError?.Message);
+
+        _logger.LogError(lastError, "Sync failed permanently for {ProviderName} after {Attempts} attempts.",
+            job.ProviderName, config.MaxRetryAttempts + 1);
     }
 }

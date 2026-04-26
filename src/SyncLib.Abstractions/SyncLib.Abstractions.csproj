@@ -1,9 +1,12 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
+    <RootNamespace>SyncLib.Abstractions</RootNamespace>
+    <AssemblyName>SyncLib.Abstractions</AssemblyName>
+    <PackageId>SyncLib.Abstractions</PackageId>
+    <Description>Interfaces for SyncLib: a small library for scheduled data-synchronization jobs in .NET.</Description>
+    <IsPackable>true</IsPackable>
   </PropertyGroup>
 
 </Project>

@@ -1,9 +1,14 @@
-﻿// Core/SyncOrchestrator.cs
-using System.Security.Principal;
+namespace SyncLib.Core;
 
-namespace SyncLibrary.Core;
-
-public class CircuitBreakerOpenException : Exception
+/// <summary>
+/// Thrown internally when a sync run is skipped because its provider's circuit
+/// breaker is currently open.
+/// </summary>
+public sealed class CircuitBreakerOpenException : Exception
 {
+    /// <inheritdoc />
     public CircuitBreakerOpenException(string message) : base(message) { }
+
+    /// <inheritdoc />
+    public CircuitBreakerOpenException(string message, Exception inner) : base(message, inner) { }
 }
