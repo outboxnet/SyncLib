@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/samples/" />
+  <Folder Name="/src/">
+    <Project Path="src/SyncLib.Abstractions/SyncLib.Abstractions.csproj" />
+    <Project Path="src/SyncLib.Core/SyncLib.Core.csproj" />
+  </Folder>
+</Solution>
