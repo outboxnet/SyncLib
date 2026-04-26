@@ -39,6 +39,39 @@ services.AddDbContext<AppDbContext>(o => o.UseSqlServer(connStr));
 services.AddEntityFrameworkSyncStateStore<AppDbContext>();
 ```
 
+## Hosting models
+
+SyncLib has two entry points and you pick whichever matches your host:
+
+| Host | Register | Drives the schedule |
+| --- | --- | --- |
+| ASP.NET / Worker Service | `services.AddSyncLibrary()` | A built-in `BackgroundService` runs each provider on its `SyncInterval`. |
+| Azure Functions / cron job / on-demand | `services.AddSyncRunner()` | **You** invoke `ISyncRunner.RunAllAsync()` (or `RunAsync(name)`) — typically from a `[TimerTrigger]`. |
+
+The same fetch → map → repository → state → metrics pipeline runs in both
+modes. Your `WithRepository<TYourRepo>()` is what actually persists data, so
+"the common logic" is shared regardless of who pulls the trigger.
+
+### Azure Functions example
+
+```csharp
+// Program.cs
+builder.Services.AddSyncRunner();
+builder.Services.AddSyncProvider<WeatherDto, WeatherEntity>("weather")
+    .WithConfiguration(new ProviderSyncConfiguration { ProviderName = "weather", MaxRetryAttempts = 2 })
+    .WithDataProvider<WeatherApiProvider>()
+    .WithRepository<MyWeatherRepository>()   // your own implementation
+    .WithMapper<WeatherMapper>()
+    .Build();
+
+// SyncTimerFunction.cs
+[Function("RunAllSyncs")]
+public Task Run([TimerTrigger("0 */5 * * * *")] TimerInfo timer, CancellationToken ct)
+    => _runner.RunAllAsync(ct);
+```
+
+Full sample under `samples/SyncLib.Sample.AzureFunctions`.
+
 ## Observability
 
 * **Sync state per provider** — query `ISyncStateReader` for last run time,

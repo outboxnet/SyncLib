@@ -96,6 +96,45 @@ public class SyncOrchestratorTests
     }
 
     [Fact]
+    public async Task RunAllAsync_RunsEveryProvider_AndAggregatesOutcomes()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSyncRunner();
+
+        services.AddSyncProvider<FakeDto, FakeEntity>("ok")
+            .WithConfiguration(new ProviderSyncConfiguration { ProviderName = "ok", MaxRetryAttempts = 0 })
+            .WithDataProvider<FakeDataProvider>()
+            .WithRepository<FakeRepository>()
+            .WithMapper<FakeMapper>()
+            .Build();
+
+        services.AddSyncProvider<OtherDto, OtherEntity>("bad")
+            .WithConfiguration(new ProviderSyncConfiguration
+            {
+                ProviderName = "bad",
+                MaxRetryAttempts = 0,
+                EnableCircuitBreaker = false,
+                RetryDelayBase = TimeSpan.FromMilliseconds(1)
+            })
+            .WithDataProvider<AlwaysFailsOtherProvider>()
+            .WithRepository<OtherRepository>()
+            .WithMapper<OtherMapper>()
+            .Build();
+
+        await using var sp = services.BuildServiceProvider();
+        var runner = sp.GetRequiredService<ISyncRunner>();
+
+        var summary = await runner.RunAllAsync();
+
+        Assert.Equal(2, summary.TotalProviders);
+        Assert.Equal(1, summary.Succeeded);
+        Assert.Equal(1, summary.Failed);
+        Assert.False(summary.IsHealthy);
+        Assert.Contains("bad", summary.ProviderErrors.Keys);
+    }
+
+    [Fact]
     public async Task TriggerManualSync_Throws_ForUnknownProvider()
     {
         var services = new ServiceCollection();
@@ -163,5 +202,37 @@ public class SyncOrchestratorTests
     {
         public FakeEntity MapToEntity(FakeDto data) => new() { Id = Guid.NewGuid(), N = data.N };
         public IReadOnlyCollection<FakeEntity> MapToEntities(IEnumerable<FakeDto> data) => data.Select(MapToEntity).ToArray();
+    }
+
+    public sealed record OtherDto(string S);
+
+    public sealed class OtherEntity : IEntity
+    {
+        public Guid Id { get; set; }
+        public string S { get; set; } = "";
+        public DateTime CreatedAt { get; set; }
+        public DateTime? UpdatedAt { get; set; }
+    }
+
+    private sealed class AlwaysFailsOtherProvider : ISyncDataProvider<OtherDto>
+    {
+        public string ProviderName => "bad";
+        public Task<IReadOnlyCollection<OtherDto>> FetchDataAsync(CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("nope");
+        public Task<IReadOnlyCollection<OtherDto>> FetchDataAsync(DateTime? lastSyncTime, CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("nope");
+    }
+
+    private sealed class OtherRepository : ISyncRepository<OtherEntity>
+    {
+        public Task AddOrUpdateBatchAsync(IEnumerable<OtherEntity> entities, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<int> GetCountAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
+        public Task ClearOldDataAsync(DateTime olderThan, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class OtherMapper : ISyncMapper<OtherDto, OtherEntity>
+    {
+        public OtherEntity MapToEntity(OtherDto data) => new() { Id = Guid.NewGuid(), S = data.S };
+        public IReadOnlyCollection<OtherEntity> MapToEntities(IEnumerable<OtherDto> data) => data.Select(MapToEntity).ToArray();
     }
 }

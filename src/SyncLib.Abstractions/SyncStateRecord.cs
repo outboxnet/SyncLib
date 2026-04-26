@@ -1,13 +1,13 @@
 namespace SyncLib.Abstractions;
 
 /// <summary>
-/// Snapshot of a provider's most recent sync activity. Returned by
+/// Snapshot of a single sync stream's most recent activity. Returned by
 /// <see cref="ISyncStateReader"/> and persisted by <see cref="ISyncStateStore"/>.
 /// </summary>
 public sealed record SyncStateRecord
 {
-    /// <summary>Provider name (matches <see cref="ISyncConfiguration.ProviderName"/>).</summary>
-    public required string ProviderName { get; init; }
+    /// <summary>Composite identity of the stream.</summary>
+    public required SyncStateKey Key { get; init; }
 
     /// <summary>UTC time the most recent successful run started, if any.</summary>
     public DateTime? LastSuccessAt { get; init; }
@@ -21,16 +21,16 @@ public sealed record SyncStateRecord
     /// <summary>Duration of the most recent run.</summary>
     public TimeSpan? LastDuration { get; init; }
 
-    /// <summary>Records persisted on the most recent successful run.</summary>
+    /// <summary>Records handed to the handler on the most recent successful run.</summary>
     public int? LastRecordCount { get; init; }
 
     /// <summary>Error message of the most recent failed run, if any.</summary>
     public string? LastError { get; init; }
 
-    /// <summary>Total number of successful runs since the state record was created.</summary>
+    /// <summary>Total number of successful runs since the record was created.</summary>
     public long TotalSuccesses { get; init; }
 
-    /// <summary>Total number of failed runs since the state record was created.</summary>
+    /// <summary>Total number of failed runs since the record was created.</summary>
     public long TotalFailures { get; init; }
 
     /// <summary>Number of consecutive failed runs (resets on success).</summary>

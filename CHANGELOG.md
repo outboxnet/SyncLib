@@ -7,6 +7,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `ISyncRunner` (with `RunAsync(name)` / `RunAllAsync()` returning a
+  `SyncRunSummary`) and `services.AddSyncRunner()` for hosts that drive the
+  schedule themselves — Azure Functions timer triggers, console jobs, etc.
+- `samples/SyncLib.Sample.AzureFunctions` demonstrating a `[TimerTrigger]`
+  fan-out across all registered providers using a caller-supplied repository.
 - `ISyncStateStore` / `ISyncStateReader` for tracking per-provider sync state
   (last run time, status, duration, records, error) separately from domain
   entities.

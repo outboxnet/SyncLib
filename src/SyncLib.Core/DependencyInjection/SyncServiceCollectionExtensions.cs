@@ -9,14 +9,27 @@ namespace SyncLib.Core.DependencyInjection;
 public static class SyncServiceCollectionExtensions
 {
     /// <summary>
-    /// Register the SyncLib orchestrator and an in-memory sync state store. Replace
-    /// the state store later (e.g. with <c>AddEntityFrameworkSyncStateStore</c>) for
-    /// persistent state across restarts.
+    /// Register the on-demand <see cref="ISyncRunner"/> and an in-memory state store.
+    /// Does <b>not</b> register a <see cref="IHostedService"/>. Use this from
+    /// hosts that drive scheduling externally (Azure Functions timer trigger,
+    /// console job, controller endpoint, …).
+    /// </summary>
+    public static IServiceCollection AddSyncRunner(this IServiceCollection services)
+    {
+        services.TryAddSingleton<ISyncStateStore, InMemorySyncStateStore>();
+        services.TryAddSingleton(sp => (ISyncStateReader)sp.GetRequiredService<ISyncStateStore>());
+        services.TryAddSingleton<ISyncRunner, SyncRunner>();
+        return services;
+    }
+
+    /// <summary>
+    /// Register everything <see cref="AddSyncRunner"/> registers, plus the hosted
+    /// <see cref="SyncOrchestrator"/> that schedules each provider on its
+    /// configured interval. Use from long-lived hosts (ASP.NET, Worker Service).
     /// </summary>
     public static IServiceCollection AddSyncLibrary(this IServiceCollection services)
     {
-        services.TryAddSingleton<ISyncStateStore, InMemorySyncStateStore>();
-        services.AddSingleton(sp => (ISyncStateReader)sp.GetRequiredService<ISyncStateStore>());
+        services.AddSyncRunner();
 
         services.AddSingleton<SyncOrchestrator>();
         services.AddSingleton<ISyncOrchestrator>(sp => sp.GetRequiredService<SyncOrchestrator>());

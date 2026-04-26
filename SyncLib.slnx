@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/samples/">
     <Project Path="samples/SyncLib.Sample.WebApi/SyncLib.Sample.WebApi.csproj" />
+    <Project Path="samples/SyncLib.Sample.AzureFunctions/SyncLib.Sample.AzureFunctions.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/SyncLib.Abstractions/SyncLib.Abstractions.csproj" />
