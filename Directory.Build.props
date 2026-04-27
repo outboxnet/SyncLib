@@ -17,8 +17,8 @@
     <Product>SyncLib</Product>
     <Copyright>Copyright (c) SyncLib Contributors</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/synclib/synclib</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/synclib/synclib</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/outboxnet/SyncLib</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/outboxnet/SyncLib</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>sync;synchronization;background-job;ef-core;observability</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
