@@ -5,7 +5,7 @@ using SyncLib.Core;
 namespace SyncLib.Sample.AzureFunctions;
 
 /// <summary>
-/// One CRON-driven function that runs every registered provider's sync. The
+/// One CRON-driven function that runs every registered stream's sync. The
 /// runner applies the same retry/circuit-breaker/state/metrics pipeline used
 /// by <see cref="SyncOrchestrator"/>; only the scheduling source is different.
 /// </summary>
@@ -20,27 +20,27 @@ public sealed class SyncTimerFunction
         _logger = logger;
     }
 
-    /// <summary>Run all providers every 5 minutes (configure in host.json or via app setting).</summary>
+    /// <summary>Run all streams every 5 minutes (configure in host.json or via app setting).</summary>
     [Function("RunAllSyncs")]
     public async Task RunAll(
         [TimerTrigger("0 */5 * * * *")] TimerInfo timer,
         CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Timer fired at {Now:o}; providers: {Providers}",
-            DateTime.UtcNow, string.Join(",", _runner.RegisteredProviders));
+        _logger.LogInformation("Timer fired at {Now:o}; streams: {Streams}",
+            DateTime.UtcNow, string.Join(",", _runner.RegisteredStreams.Select(k => k.ToString())));
 
         var summary = await _runner.RunAllAsync(cancellationToken);
 
         _logger.LogInformation("Sync summary: {Total} total, {Ok} succeeded, {Failed} failed, {Skipped} skipped.",
-            summary.TotalProviders, summary.Succeeded, summary.Failed, summary.Skipped);
+            summary.TotalStreams, summary.Succeeded, summary.Failed, summary.Skipped);
 
         if (!summary.IsHealthy)
         {
             // Surface a non-success outcome so AppInsights / portal can alert.
             // In Functions Worker, throwing causes the invocation to be marked failed.
             throw new InvalidOperationException(
-                "One or more providers failed: " +
-                string.Join("; ", summary.ProviderErrors.Select(kv => $"{kv.Key}: {kv.Value}")));
+                "One or more streams failed: " +
+                string.Join("; ", summary.StreamErrors.Select(kv => $"{kv.Key}: {kv.Value}")));
         }
     }
 }

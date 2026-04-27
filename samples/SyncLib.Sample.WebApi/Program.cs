@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using SyncLib.Abstractions;
-using SyncLib.Core.Configuration;
 using SyncLib.Core.DependencyInjection;
 using SyncLib.EntityFrameworkCore;
 using SyncLib.Sample.WebApi;
@@ -23,22 +22,27 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     }
 });
 
-// SyncLib core + EF Core state store
+// SyncLib core + EF Core state store.
 builder.Services.AddSyncLibrary();
 builder.Services.AddEntityFrameworkSyncStateStore<AppDbContext>();
 
-// Register one provider: weather
-builder.Services.AddSyncProvider<WeatherDto, WeatherEntity>("weather")
-    .WithConfiguration(new ProviderSyncConfiguration
-    {
-        ProviderName = "weather",
-        SyncInterval = TimeSpan.FromSeconds(30),
-        MaxRetryAttempts = 2,
-        RetryDelayBase = TimeSpan.FromSeconds(1)
-    })
-    .WithDataProvider<WeatherApiProvider>()
-    .WithRepository<EfSyncRepository<AppDbContext, WeatherEntity>>()
-    .WithMapper<WeatherMapper>()
+// Single API client backs every weather stream. The consumer owns this
+// registration — SyncLib never assumes how the client is constructed (HTTP,
+// gRPC, in-proc fake, etc.).
+builder.Services.AddScoped<IWeatherApi, FakeWeatherApi>();
+
+// Stream 1: forecasts — runs every 30 seconds.
+builder.Services.AddSyncStream<IWeatherApi, ForecastDto>("weather", "forecasts")
+    .WithFetch((api, since, ct) => api.GetForecastsAsync(since, ct))
+    .HandledBy<ForecastHandler>()
+    .WithSchedule(TimeSpan.FromSeconds(30))
+    .Build();
+
+// Stream 2: alerts — runs every 10 seconds, against the SAME client.
+builder.Services.AddSyncStream<IWeatherApi, AlertDto>("weather", "alerts")
+    .WithFetch((api, since, ct) => api.GetAlertsAsync(since, ct))
+    .HandledBy<AlertHandler>()
+    .WithSchedule(TimeSpan.FromSeconds(10))
     .Build();
 
 var app = builder.Build();
@@ -59,18 +63,24 @@ using (var scope = app.Services.CreateScope())
 
 // ---- Observability endpoints ---------------------------------------------
 
-// All providers' last sync state.
+// All streams' last sync state.
 app.MapGet("/sync/state", async (ISyncStateReader reader, CancellationToken ct) =>
     Results.Ok(await reader.GetAllAsync(ct)));
 
-// One provider's state.
+// One provider's streams.
 app.MapGet("/sync/state/{providerName}", async (string providerName, ISyncStateReader reader, CancellationToken ct) =>
-    await reader.GetAsync(providerName, ct) is { } state ? Results.Ok(state) : Results.NotFound());
+    Results.Ok(await reader.GetByProviderAsync(providerName, ct)));
 
-// Trigger a manual sync now.
-app.MapPost("/sync/{providerName}/run", async (string providerName, SyncLib.Core.ISyncOrchestrator orch, CancellationToken ct) =>
+// One stream.
+app.MapGet("/sync/state/{providerName}/{streamName}", async (string providerName, string streamName, ISyncStateReader reader, CancellationToken ct) =>
+    await reader.GetAsync(new SyncStateKey(providerName, streamName), ct) is { } state
+        ? Results.Ok(state)
+        : Results.NotFound());
+
+// Trigger a manual sync now for one stream.
+app.MapPost("/sync/{providerName}/{streamName}/run", async (string providerName, string streamName, SyncLib.Core.ISyncOrchestrator orch, CancellationToken ct) =>
 {
-    await orch.TriggerManualSyncAsync(providerName, ct);
+    await orch.TriggerManualSyncAsync(new SyncStateKey(providerName, streamName), ct);
     return Results.Accepted();
 });
 
@@ -80,21 +90,26 @@ app.MapGet("/healthz/sync", async (ISyncStateReader reader, CancellationToken ct
     var states = await reader.GetAllAsync(ct);
     var unhealthy = states.Where(s => s.LastStatus is SyncStatus.Failed or SyncStatus.Skipped).ToArray();
     return unhealthy.Length == 0
-        ? Results.Ok(new { status = "healthy", providers = states.Count })
-        : Results.Json(new { status = "degraded", failing = unhealthy.Select(s => s.ProviderName) }, statusCode: 503);
+        ? Results.Ok(new { status = "healthy", streams = states.Count })
+        : Results.Json(new { status = "degraded", failing = unhealthy.Select(s => s.Key.ToString()) }, statusCode: 503);
 });
 
-// Dump persisted weather rows to demonstrate the sync ran end-to-end.
-app.MapGet("/weather", async (AppDbContext db, CancellationToken ct) =>
-    Results.Ok(await db.Weather.AsNoTracking().OrderBy(w => w.City).ToListAsync(ct)));
+// Dump persisted rows to demonstrate the sync ran end-to-end.
+app.MapGet("/forecasts", async (AppDbContext db, CancellationToken ct) =>
+    Results.Ok(await db.Forecasts.AsNoTracking().OrderBy(w => w.City).ToListAsync(ct)));
+
+app.MapGet("/alerts", async (AppDbContext db, CancellationToken ct) =>
+    Results.Ok(await db.Alerts.AsNoTracking().OrderByDescending(a => a.IssuedAt).Take(50).ToListAsync(ct)));
 
 app.MapGet("/", () => Results.Text("""
     SyncLib sample.
-      GET  /sync/state                — last sync state for all providers
-      GET  /sync/state/{provider}     — last sync state for one provider
-      POST /sync/{provider}/run       — trigger a sync now
-      GET  /weather                   — synced rows
-      GET  /healthz/sync              — degraded if any provider failed/skipped last
+      GET  /sync/state                          — last sync state for all streams
+      GET  /sync/state/{provider}               — streams for one provider
+      GET  /sync/state/{provider}/{stream}      — one stream
+      POST /sync/{provider}/{stream}/run        — trigger a sync now
+      GET  /forecasts                           — synced forecasts
+      GET  /alerts                              — synced alerts
+      GET  /healthz/sync                        — degraded if any stream failed/skipped last
     """));
 
 app.Run();

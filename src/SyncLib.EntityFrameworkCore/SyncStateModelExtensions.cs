@@ -22,8 +22,9 @@ public static class SyncStateModelExtensions
         modelBuilder.Entity<SyncStateEntity>(b =>
         {
             b.ToTable(tableName, schema);
-            b.HasKey(x => x.ProviderName);
+            b.HasKey(x => new { x.ProviderName, x.StreamName });
             b.Property(x => x.ProviderName).HasMaxLength(200).IsRequired();
+            b.Property(x => x.StreamName).HasMaxLength(200).IsRequired();
             b.Property(x => x.LastError).HasMaxLength(4000);
             b.Property(x => x.RowVersion).IsRowVersion();
         });

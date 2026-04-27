@@ -27,25 +27,34 @@ public sealed class SyncStateFunction
         CancellationToken cancellationToken)
         => new OkObjectResult(await _reader.GetAllAsync(cancellationToken));
 
-    [Function("GetSyncState")]
-    public async Task<IActionResult> Get(
+    [Function("GetProviderSyncState")]
+    public async Task<IActionResult> GetForProvider(
         [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "sync/state/{providerName}")] HttpRequest req,
         string providerName,
         CancellationToken cancellationToken)
+        => new OkObjectResult(await _reader.GetByProviderAsync(providerName, cancellationToken));
+
+    [Function("GetStreamSyncState")]
+    public async Task<IActionResult> Get(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "sync/state/{providerName}/{streamName}")] HttpRequest req,
+        string providerName,
+        string streamName,
+        CancellationToken cancellationToken)
     {
-        var state = await _reader.GetAsync(providerName, cancellationToken);
+        var state = await _reader.GetAsync(new SyncStateKey(providerName, streamName), cancellationToken);
         return state is null ? new NotFoundResult() : new OkObjectResult(state);
     }
 
-    [Function("RunSyncNow")]
+    [Function("RunStreamNow")]
     public async Task<IActionResult> Run(
-        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "sync/{providerName}/run")] HttpRequest req,
+        [HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "sync/{providerName}/{streamName}/run")] HttpRequest req,
         string providerName,
+        string streamName,
         CancellationToken cancellationToken)
     {
         try
         {
-            await _runner.RunAsync(providerName, cancellationToken);
+            await _runner.RunAsync(new SyncStateKey(providerName, streamName), cancellationToken);
             return new AcceptedResult();
         }
         catch (ArgumentException ex)

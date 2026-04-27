@@ -1,9 +1,10 @@
 namespace SyncLib.Abstractions;
 
 /// <summary>
-/// Read/write access to per-provider sync state. The orchestrator uses this to
+/// Read/write access to per-stream sync state. The orchestrator uses this to
 /// look up the last successful sync time (for incremental fetches) and to record
-/// the outcome of every run.
+/// the outcome of every run. State is keyed by <see cref="SyncStateKey"/> so a
+/// single provider can have multiple independent streams (one per DTO type).
 /// </summary>
 /// <remarks>
 /// Inherits <see cref="ISyncStateReader"/>; if you only need to query state from
@@ -12,16 +13,16 @@ namespace SyncLib.Abstractions;
 public interface ISyncStateStore : ISyncStateReader
 {
     /// <summary>Mark a run as starting. Sets <see cref="SyncStatus.Running"/>.</summary>
-    Task RecordRunStartedAsync(string providerName, DateTime startedAtUtc, CancellationToken cancellationToken = default);
+    Task RecordRunStartedAsync(SyncStateKey key, DateTime startedAtUtc, CancellationToken cancellationToken = default);
 
     /// <summary>Mark a run as successfully completed.</summary>
-    Task RecordSuccessAsync(string providerName, DateTime startedAtUtc, TimeSpan duration, int recordCount, CancellationToken cancellationToken = default);
+    Task RecordSuccessAsync(SyncStateKey key, DateTime startedAtUtc, TimeSpan duration, int recordCount, CancellationToken cancellationToken = default);
 
     /// <summary>Mark a run as failed (after retries are exhausted).</summary>
-    Task RecordFailureAsync(string providerName, DateTime startedAtUtc, TimeSpan duration, Exception exception, CancellationToken cancellationToken = default);
+    Task RecordFailureAsync(SyncStateKey key, DateTime startedAtUtc, TimeSpan duration, Exception exception, CancellationToken cancellationToken = default);
 
     /// <summary>Mark a run as skipped (e.g. because the circuit breaker was open).</summary>
-    Task RecordSkippedAsync(string providerName, DateTime atUtc, string reason, CancellationToken cancellationToken = default);
+    Task RecordSkippedAsync(SyncStateKey key, DateTime atUtc, string reason, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -30,9 +31,12 @@ public interface ISyncStateStore : ISyncStateReader
 /// </summary>
 public interface ISyncStateReader
 {
-    /// <summary>Get the most recent state for a single provider, or <c>null</c> if it has never run.</summary>
-    Task<SyncStateRecord?> GetAsync(string providerName, CancellationToken cancellationToken = default);
+    /// <summary>Get the most recent state for a single stream, or <c>null</c> if it has never run.</summary>
+    Task<SyncStateRecord?> GetAsync(SyncStateKey key, CancellationToken cancellationToken = default);
 
-    /// <summary>Get the most recent state for every known provider.</summary>
+    /// <summary>Get the most recent state for every known stream.</summary>
     Task<IReadOnlyCollection<SyncStateRecord>> GetAllAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>Get the most recent state for every stream belonging to a single provider.</summary>
+    Task<IReadOnlyCollection<SyncStateRecord>> GetByProviderAsync(string providerName, CancellationToken cancellationToken = default);
 }

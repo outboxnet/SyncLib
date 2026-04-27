@@ -4,8 +4,8 @@ using SyncLib.Abstractions;
 namespace SyncLib.EntityFrameworkCore;
 
 /// <summary>
-/// EF-Core backed <see cref="ISyncStateStore"/>. Persists per-provider sync
-/// state into the table mapped by <see cref="SyncStateModelExtensions.ConfigureSyncState"/>.
+/// EF-Core backed <see cref="ISyncStateStore"/>. Persists per-stream sync state
+/// into the table mapped by <see cref="SyncStateModelExtensions.ConfigureSyncState"/>.
 /// </summary>
 /// <typeparam name="TContext">A consumer <see cref="DbContext"/> implementing <see cref="ISyncStateDbContext"/>.</typeparam>
 public sealed class EfSyncStateStore<TContext> : ISyncStateStore
@@ -17,10 +17,10 @@ public sealed class EfSyncStateStore<TContext> : ISyncStateStore
     public EfSyncStateStore(TContext db) => _db = db;
 
     /// <inheritdoc />
-    public async Task<SyncStateRecord?> GetAsync(string providerName, CancellationToken cancellationToken = default)
+    public async Task<SyncStateRecord?> GetAsync(SyncStateKey key, CancellationToken cancellationToken = default)
     {
         var row = await _db.SyncStates.AsNoTracking()
-            .FirstOrDefaultAsync(x => x.ProviderName == providerName, cancellationToken)
+            .FirstOrDefaultAsync(x => x.ProviderName == key.ProviderName && x.StreamName == key.StreamName, cancellationToken)
             .ConfigureAwait(false);
         return row is null ? null : ToRecord(row);
     }
@@ -33,16 +33,25 @@ public sealed class EfSyncStateStore<TContext> : ISyncStateStore
     }
 
     /// <inheritdoc />
-    public Task RecordRunStartedAsync(string providerName, DateTime startedAtUtc, CancellationToken cancellationToken = default) =>
-        UpsertAsync(providerName, row =>
+    public async Task<IReadOnlyCollection<SyncStateRecord>> GetByProviderAsync(string providerName, CancellationToken cancellationToken = default)
+    {
+        var rows = await _db.SyncStates.AsNoTracking()
+            .Where(x => x.ProviderName == providerName)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        return rows.ConvertAll(ToRecord);
+    }
+
+    /// <inheritdoc />
+    public Task RecordRunStartedAsync(SyncStateKey key, DateTime startedAtUtc, CancellationToken cancellationToken = default) =>
+        UpsertAsync(key, row =>
         {
             row.LastRunAt = startedAtUtc;
             row.LastStatus = (int)SyncStatus.Running;
         }, cancellationToken);
 
     /// <inheritdoc />
-    public Task RecordSuccessAsync(string providerName, DateTime startedAtUtc, TimeSpan duration, int recordCount, CancellationToken cancellationToken = default) =>
-        UpsertAsync(providerName, row =>
+    public Task RecordSuccessAsync(SyncStateKey key, DateTime startedAtUtc, TimeSpan duration, int recordCount, CancellationToken cancellationToken = default) =>
+        UpsertAsync(key, row =>
         {
             row.LastSuccessAt = startedAtUtc;
             row.LastRunAt = startedAtUtc + duration;
@@ -55,8 +64,8 @@ public sealed class EfSyncStateStore<TContext> : ISyncStateStore
         }, cancellationToken);
 
     /// <inheritdoc />
-    public Task RecordFailureAsync(string providerName, DateTime startedAtUtc, TimeSpan duration, Exception exception, CancellationToken cancellationToken = default) =>
-        UpsertAsync(providerName, row =>
+    public Task RecordFailureAsync(SyncStateKey key, DateTime startedAtUtc, TimeSpan duration, Exception exception, CancellationToken cancellationToken = default) =>
+        UpsertAsync(key, row =>
         {
             row.LastRunAt = startedAtUtc + duration;
             row.LastStatus = (int)SyncStatus.Failed;
@@ -67,20 +76,22 @@ public sealed class EfSyncStateStore<TContext> : ISyncStateStore
         }, cancellationToken);
 
     /// <inheritdoc />
-    public Task RecordSkippedAsync(string providerName, DateTime atUtc, string reason, CancellationToken cancellationToken = default) =>
-        UpsertAsync(providerName, row =>
+    public Task RecordSkippedAsync(SyncStateKey key, DateTime atUtc, string reason, CancellationToken cancellationToken = default) =>
+        UpsertAsync(key, row =>
         {
             row.LastRunAt = atUtc;
             row.LastStatus = (int)SyncStatus.Skipped;
             row.LastError = Truncate(reason, 4000);
         }, cancellationToken);
 
-    private async Task UpsertAsync(string providerName, Action<SyncStateEntity> mutate, CancellationToken cancellationToken)
+    private async Task UpsertAsync(SyncStateKey key, Action<SyncStateEntity> mutate, CancellationToken cancellationToken)
     {
-        var row = await _db.SyncStates.FirstOrDefaultAsync(x => x.ProviderName == providerName, cancellationToken).ConfigureAwait(false);
+        var row = await _db.SyncStates
+            .FirstOrDefaultAsync(x => x.ProviderName == key.ProviderName && x.StreamName == key.StreamName, cancellationToken)
+            .ConfigureAwait(false);
         if (row is null)
         {
-            row = new SyncStateEntity { ProviderName = providerName };
+            row = new SyncStateEntity { ProviderName = key.ProviderName, StreamName = key.StreamName };
             mutate(row);
             _db.SyncStates.Add(row);
         }
@@ -105,7 +116,7 @@ public sealed class EfSyncStateStore<TContext> : ISyncStateStore
 
     private static SyncStateRecord ToRecord(SyncStateEntity row) => new()
     {
-        ProviderName = row.ProviderName,
+        Key = new SyncStateKey(row.ProviderName, row.StreamName),
         LastSuccessAt = row.LastSuccessAt,
         LastRunAt = row.LastRunAt,
         LastStatus = (SyncStatus)row.LastStatus,

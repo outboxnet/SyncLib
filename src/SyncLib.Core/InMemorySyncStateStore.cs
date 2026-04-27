@@ -10,12 +10,12 @@ namespace SyncLib.Core;
 /// </summary>
 public sealed class InMemorySyncStateStore : ISyncStateStore
 {
-    private readonly ConcurrentDictionary<string, SyncStateRecord> _state = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<SyncStateKey, SyncStateRecord> _state = new();
 
     /// <inheritdoc />
-    public Task<SyncStateRecord?> GetAsync(string providerName, CancellationToken cancellationToken = default)
+    public Task<SyncStateRecord?> GetAsync(SyncStateKey key, CancellationToken cancellationToken = default)
     {
-        _state.TryGetValue(providerName, out var record);
+        _state.TryGetValue(key, out var record);
         return Task.FromResult(record);
     }
 
@@ -24,21 +24,28 @@ public sealed class InMemorySyncStateStore : ISyncStateStore
         Task.FromResult<IReadOnlyCollection<SyncStateRecord>>(_state.Values.ToArray());
 
     /// <inheritdoc />
-    public Task RecordRunStartedAsync(string providerName, DateTime startedAtUtc, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyCollection<SyncStateRecord>> GetByProviderAsync(string providerName, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyCollection<SyncStateRecord>>(
+            _state.Values
+                .Where(r => string.Equals(r.Key.ProviderName, providerName, StringComparison.OrdinalIgnoreCase))
+                .ToArray());
+
+    /// <inheritdoc />
+    public Task RecordRunStartedAsync(SyncStateKey key, DateTime startedAtUtc, CancellationToken cancellationToken = default)
     {
-        _state.AddOrUpdate(providerName,
-            _ => new SyncStateRecord { ProviderName = providerName, LastStatus = SyncStatus.Running, LastRunAt = startedAtUtc },
+        _state.AddOrUpdate(key,
+            _ => new SyncStateRecord { Key = key, LastStatus = SyncStatus.Running, LastRunAt = startedAtUtc },
             (_, prev) => prev with { LastStatus = SyncStatus.Running, LastRunAt = startedAtUtc });
         return Task.CompletedTask;
     }
 
     /// <inheritdoc />
-    public Task RecordSuccessAsync(string providerName, DateTime startedAtUtc, TimeSpan duration, int recordCount, CancellationToken cancellationToken = default)
+    public Task RecordSuccessAsync(SyncStateKey key, DateTime startedAtUtc, TimeSpan duration, int recordCount, CancellationToken cancellationToken = default)
     {
-        _state.AddOrUpdate(providerName,
+        _state.AddOrUpdate(key,
             _ => new SyncStateRecord
             {
-                ProviderName = providerName,
+                Key = key,
                 LastStatus = SyncStatus.Succeeded,
                 LastRunAt = startedAtUtc + duration,
                 LastSuccessAt = startedAtUtc,
@@ -61,12 +68,12 @@ public sealed class InMemorySyncStateStore : ISyncStateStore
     }
 
     /// <inheritdoc />
-    public Task RecordFailureAsync(string providerName, DateTime startedAtUtc, TimeSpan duration, Exception exception, CancellationToken cancellationToken = default)
+    public Task RecordFailureAsync(SyncStateKey key, DateTime startedAtUtc, TimeSpan duration, Exception exception, CancellationToken cancellationToken = default)
     {
-        _state.AddOrUpdate(providerName,
+        _state.AddOrUpdate(key,
             _ => new SyncStateRecord
             {
-                ProviderName = providerName,
+                Key = key,
                 LastStatus = SyncStatus.Failed,
                 LastRunAt = startedAtUtc + duration,
                 LastDuration = duration,
@@ -87,10 +94,10 @@ public sealed class InMemorySyncStateStore : ISyncStateStore
     }
 
     /// <inheritdoc />
-    public Task RecordSkippedAsync(string providerName, DateTime atUtc, string reason, CancellationToken cancellationToken = default)
+    public Task RecordSkippedAsync(SyncStateKey key, DateTime atUtc, string reason, CancellationToken cancellationToken = default)
     {
-        _state.AddOrUpdate(providerName,
-            _ => new SyncStateRecord { ProviderName = providerName, LastStatus = SyncStatus.Skipped, LastRunAt = atUtc, LastError = reason },
+        _state.AddOrUpdate(key,
+            _ => new SyncStateRecord { Key = key, LastStatus = SyncStatus.Skipped, LastRunAt = atUtc, LastError = reason },
             (_, prev) => prev with { LastStatus = SyncStatus.Skipped, LastRunAt = atUtc, LastError = reason });
         return Task.CompletedTask;
     }

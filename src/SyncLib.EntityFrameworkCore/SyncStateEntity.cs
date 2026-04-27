@@ -3,12 +3,16 @@ namespace SyncLib.EntityFrameworkCore;
 /// <summary>
 /// EF-mapped persistence row for sync state. Public so consumers can include it
 /// in their <see cref="Microsoft.EntityFrameworkCore.DbContext"/>; only the
-/// <see cref="EfSyncStateStore{TContext}"/> should mutate instances.
+/// <see cref="EfSyncStateStore{TContext}"/> should mutate instances. Composite
+/// primary key: (<see cref="ProviderName"/>, <see cref="StreamName"/>).
 /// </summary>
 public sealed class SyncStateEntity
 {
-    /// <summary>Provider name; primary key.</summary>
+    /// <summary>Provider name; part of the composite primary key.</summary>
     public string ProviderName { get; set; } = null!;
+
+    /// <summary>Stream name; part of the composite primary key.</summary>
+    public string StreamName { get; set; } = null!;
 
     /// <summary>UTC time of the last successful run.</summary>
     public DateTime? LastSuccessAt { get; set; }
@@ -22,7 +26,7 @@ public sealed class SyncStateEntity
     /// <summary>Most recent duration in <see cref="TimeSpan"/> ticks.</summary>
     public long? LastDurationTicks { get; set; }
 
-    /// <summary>Records persisted on the most recent successful run.</summary>
+    /// <summary>Records handed to the handler on the most recent successful run.</summary>
     public int? LastRecordCount { get; set; }
 
     /// <summary>Most recent error message, if any.</summary>

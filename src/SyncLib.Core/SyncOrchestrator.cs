@@ -5,9 +5,9 @@ using SyncLib.Abstractions;
 namespace SyncLib.Core;
 
 /// <summary>
-/// Hosted service that drives <see cref="ISyncRunner"/> on each provider's
-/// configured <see cref="ISyncConfiguration.SyncInterval"/>. Use when SyncLib
-/// runs inside a long-lived host (Worker Service, ASP.NET, …).
+/// Hosted service that drives <see cref="ISyncRunner"/> on each stream's
+/// configured <see cref="Configuration.StreamConfiguration.SyncInterval"/>. Use
+/// when SyncLib runs inside a long-lived host (Worker Service, ASP.NET, …).
 /// </summary>
 /// <remarks>
 /// For Azure Functions or any externally-scheduled host, use
@@ -16,72 +16,71 @@ namespace SyncLib.Core;
 public sealed class SyncOrchestrator : BackgroundService, ISyncOrchestrator
 {
     private readonly ISyncRunner _runner;
-    private readonly IReadOnlyDictionary<string, ISyncConfiguration> _configurations;
+    private readonly IReadOnlyDictionary<SyncStateKey, SyncStreamRegistration> _streams;
     private readonly ILogger<SyncOrchestrator> _logger;
 
     /// <summary>DI constructor.</summary>
     public SyncOrchestrator(
         ISyncRunner runner,
-        IEnumerable<ISyncConfiguration> configurations,
+        IEnumerable<SyncStreamRegistration> registrations,
         ILogger<SyncOrchestrator> logger)
     {
         _runner = runner;
-        _configurations = configurations.ToDictionary(c => c.ProviderName, StringComparer.OrdinalIgnoreCase);
+        _streams = registrations.ToDictionary(r => r.Key);
         _logger = logger;
     }
 
     /// <inheritdoc />
-    public IReadOnlyCollection<string> RegisteredProviders => _runner.RegisteredProviders;
+    public IReadOnlyCollection<SyncStateKey> RegisteredStreams => _runner.RegisteredStreams;
 
     /// <inheritdoc />
-    public Task TriggerManualSyncAsync(string providerName, CancellationToken cancellationToken = default)
+    public Task TriggerManualSyncAsync(SyncStateKey key, CancellationToken cancellationToken = default)
     {
-        _logger.LogInformation("Manual sync triggered for {ProviderName}", providerName);
-        return _runner.RunAsync(providerName, cancellationToken);
+        _logger.LogInformation("Manual sync triggered for {StreamKey}", key);
+        return _runner.RunAsync(key, cancellationToken);
     }
 
     /// <inheritdoc />
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var providers = _runner.RegisteredProviders;
-        if (providers.Count == 0)
+        if (_streams.Count == 0)
         {
-            _logger.LogInformation("SyncOrchestrator started with no registered providers.");
+            _logger.LogInformation("SyncOrchestrator started with no registered streams.");
             return Task.CompletedTask;
         }
 
-        var loops = providers.Select(name => RunProviderLoopAsync(name, _configurations[name], stoppingToken));
+        var loops = _streams.Values.Select(stream => RunStreamLoopAsync(stream, stoppingToken));
         return Task.WhenAll(loops);
     }
 
-    private async Task RunProviderLoopAsync(string providerName, ISyncConfiguration config, CancellationToken stoppingToken)
+    private async Task RunStreamLoopAsync(SyncStreamRegistration stream, CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Starting sync loop for {ProviderName} every {Interval}", providerName, config.SyncInterval);
+        var interval = stream.Configuration.SyncInterval;
+        _logger.LogInformation("Starting sync loop for {StreamKey} every {Interval}", stream.Key, interval);
 
-        // Run immediately, then on interval.
         try
         {
-            await _runner.RunAsync(providerName, stoppingToken).ConfigureAwait(false);
+            await _runner.RunAsync(stream.Key, stoppingToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Initial run for {ProviderName} ended with handled error.", providerName);
+            _logger.LogDebug(ex, "Initial run for {StreamKey} ended with handled error.", stream.Key);
         }
 
-        using var timer = new PeriodicTimer(config.SyncInterval);
+        using var timer = new PeriodicTimer(interval);
         try
         {
             while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
             {
                 try
                 {
-                    await _runner.RunAsync(providerName, stoppingToken).ConfigureAwait(false);
+                    await _runner.RunAsync(stream.Key, stoppingToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "Run loop for {ProviderName} continued past handled error.", providerName);
+                    _logger.LogDebug(ex, "Run loop for {StreamKey} continued past handled error.", stream.Key);
                 }
             }
         }

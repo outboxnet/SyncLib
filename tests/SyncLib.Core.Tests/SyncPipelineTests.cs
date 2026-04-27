@@ -7,112 +7,101 @@ namespace SyncLib.Core.Tests;
 
 public class SyncPipelineTests
 {
+    private static readonly SyncStateKey Key = new("p", "default");
+
     [Fact]
     public async Task Execute_FullFetch_WhenNoPriorSuccess()
     {
-        var (sp, provider, repo) = BuildScope(lastSuccess: null);
+        var (sp, client, handler) = BuildScope(lastSuccess: null);
 
-        var count = await new SyncPipeline<Dto, Ent>("p").ExecuteAsync(sp, default);
+        var pipeline = new SyncPipeline<IFakeClient, Dto>(Key, (c, since, ct) => c.FetchAsync(since, ct));
+        var count = await pipeline.ExecuteAsync(sp, default);
 
         Assert.Equal(2, count);
-        Assert.Null(provider.LastFetchSince);
-        Assert.Equal(2, repo.UpsertedBatches.Single().Count);
+        Assert.Null(client.LastFetchSince);
+        Assert.Single(handler.HandledBatches);
+        Assert.Equal(2, handler.HandledBatches[0].Count);
     }
 
     [Fact]
-    public async Task Execute_IncrementalFetch_UsesLastSuccessAt()
+    public async Task Execute_PassesLastSuccessAt_ToFetch()
     {
         var since = new DateTime(2025, 1, 2, 3, 4, 5, DateTimeKind.Utc);
-        var (sp, provider, _) = BuildScope(lastSuccess: since);
+        var (sp, client, _) = BuildScope(lastSuccess: since);
 
-        await new SyncPipeline<Dto, Ent>("p").ExecuteAsync(sp, default);
+        var pipeline = new SyncPipeline<IFakeClient, Dto>(Key, (c, last, ct) => c.FetchAsync(last, ct));
+        await pipeline.ExecuteAsync(sp, default);
 
-        Assert.Equal(since, provider.LastFetchSince);
+        Assert.Equal(since, client.LastFetchSince);
     }
 
     [Fact]
-    public async Task DerivedPipeline_CanOverrideFetch()
+    public async Task Handler_ReceivesContext_WithKeyAndDtoType()
     {
-        var (sp, provider, _) = BuildScope(lastSuccess: DateTime.UtcNow);
+        var (sp, _, handler) = BuildScope(lastSuccess: null);
 
-        await new ForceFullFetchPipeline("p").ExecuteAsync(sp, default);
+        var pipeline = new SyncPipeline<IFakeClient, Dto>(Key, (c, since, ct) => c.FetchAsync(since, ct));
+        await pipeline.ExecuteAsync(sp, default);
 
-        Assert.Null(provider.LastFetchSince); // override ignored the lastSuccessAt
+        var ctx = handler.LastContext;
+        Assert.NotNull(ctx);
+        Assert.Equal(Key, ctx!.Key);
+        Assert.Equal(typeof(Dto), ctx.DtoType);
     }
 
     [Fact]
-    public void Ctor_RejectsEmptyName()
+    public void Ctor_RejectsEmptyProviderOrStream()
     {
-        Assert.Throws<ArgumentException>(() => new SyncPipeline<Dto, Ent>(""));
+        Assert.Throws<ArgumentException>(() => new SyncPipeline<IFakeClient, Dto>(new SyncStateKey("", "s"), (_, _, _) => Task.FromResult<IReadOnlyCollection<Dto>>(Array.Empty<Dto>())));
+        Assert.Throws<ArgumentException>(() => new SyncPipeline<IFakeClient, Dto>(new SyncStateKey("p", ""), (_, _, _) => Task.FromResult<IReadOnlyCollection<Dto>>(Array.Empty<Dto>())));
     }
 
-    private static (IServiceProvider sp, FakeProvider provider, FakeRepo repo) BuildScope(DateTime? lastSuccess)
+    private static (IServiceProvider sp, FakeClient client, FakeHandler handler) BuildScope(DateTime? lastSuccess)
     {
         var services = new ServiceCollection();
         var store = new InMemorySyncStateStore();
         if (lastSuccess is { } t)
         {
-            // Seed a prior success so the pipeline reads it.
-            store.RecordSuccessAsync("p", t, TimeSpan.FromSeconds(1), recordCount: 5).GetAwaiter().GetResult();
+            store.RecordSuccessAsync(Key, t, TimeSpan.FromSeconds(1), recordCount: 5).GetAwaiter().GetResult();
         }
         services.AddSingleton<ISyncStateStore>(store);
-        var provider = new FakeProvider();
-        var repo = new FakeRepo();
-        services.AddSingleton<ISyncDataProvider<Dto>>(provider);
-        services.AddSingleton<ISyncRepository<Ent>>(repo);
-        services.AddSingleton<ISyncMapper<Dto, Ent>, FakeMapper>();
-        return (services.BuildServiceProvider(), provider, repo);
+
+        var client = new FakeClient();
+        services.AddSingleton<IFakeClient>(client);
+
+        var handler = new FakeHandler();
+        services.AddSingleton<ISyncDataHandler<Dto>>(handler);
+        return (services.BuildServiceProvider(), client, handler);
     }
 
     public sealed record Dto(int N);
 
-    public sealed class Ent : IEntity
+    public interface IFakeClient
     {
-        public Guid Id { get; set; }
-        public int N { get; set; }
-        public DateTime CreatedAt { get; set; }
-        public DateTime? UpdatedAt { get; set; }
+        Task<IReadOnlyCollection<Dto>> FetchAsync(DateTime? since, CancellationToken cancellationToken);
     }
 
-    private sealed class FakeProvider : ISyncDataProvider<Dto>
+    private sealed class FakeClient : IFakeClient
     {
-        public string ProviderName => "p";
         public DateTime? LastFetchSince { get; private set; }
-        public Task<IReadOnlyCollection<Dto>> FetchDataAsync(CancellationToken cancellationToken = default)
+
+        public Task<IReadOnlyCollection<Dto>> FetchAsync(DateTime? since, CancellationToken cancellationToken)
         {
-            LastFetchSince = null;
-            return Task.FromResult<IReadOnlyCollection<Dto>>([new Dto(1), new Dto(2)]);
-        }
-        public Task<IReadOnlyCollection<Dto>> FetchDataAsync(DateTime? lastSyncTime, CancellationToken cancellationToken = default)
-        {
-            LastFetchSince = lastSyncTime;
+            LastFetchSince = since;
             return Task.FromResult<IReadOnlyCollection<Dto>>([new Dto(1), new Dto(2)]);
         }
     }
 
-    private sealed class FakeRepo : ISyncRepository<Ent>
+    private sealed class FakeHandler : ISyncDataHandler<Dto>
     {
-        public List<IReadOnlyCollection<Ent>> UpsertedBatches { get; } = new();
-        public Task AddOrUpdateBatchAsync(IEnumerable<Ent> entities, CancellationToken cancellationToken = default)
+        public List<IReadOnlyCollection<Dto>> HandledBatches { get; } = new();
+        public SyncContext? LastContext { get; private set; }
+
+        public Task HandleAsync(SyncContext context, IReadOnlyCollection<Dto> data, CancellationToken cancellationToken = default)
         {
-            UpsertedBatches.Add(entities.ToArray());
+            LastContext = context;
+            HandledBatches.Add(data);
             return Task.CompletedTask;
         }
-        public Task<int> GetCountAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
-        public Task ClearOldDataAsync(DateTime olderThan, CancellationToken cancellationToken = default) => Task.CompletedTask;
-    }
-
-    private sealed class FakeMapper : ISyncMapper<Dto, Ent>
-    {
-        public Ent MapToEntity(Dto data) => new() { Id = Guid.NewGuid(), N = data.N };
-        public IReadOnlyCollection<Ent> MapToEntities(IEnumerable<Dto> data) => data.Select(MapToEntity).ToArray();
-    }
-
-    private sealed class ForceFullFetchPipeline : SyncPipeline<Dto, Ent>
-    {
-        public ForceFullFetchPipeline(string providerName) : base(providerName) { }
-        protected override Task<IReadOnlyCollection<Dto>> FetchAsync(
-            ISyncDataProvider<Dto> dataProvider, DateTime? lastSuccessAt, CancellationToken cancellationToken)
-            => dataProvider.FetchDataAsync(cancellationToken); // ignore lastSuccessAt
     }
 }

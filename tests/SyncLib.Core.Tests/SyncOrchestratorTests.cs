@@ -1,8 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
 using SyncLib.Abstractions;
 using SyncLib.Core;
-using SyncLib.Core.Configuration;
 using SyncLib.Core.DependencyInjection;
 using Xunit;
 
@@ -10,31 +8,30 @@ namespace SyncLib.Core.Tests;
 
 public class SyncOrchestratorTests
 {
+    private static readonly SyncStateKey FakeKey = new("fake", "default");
+    private static readonly SyncStateKey FlakyKey = new("flaky", "default");
+    private static readonly SyncStateKey BrokenKey = new("broken", "default");
+
     [Fact]
-    public async Task TriggerManualSync_RunsProvider_AndRecordsSuccess()
+    public async Task TriggerManualSync_RunsStream_AndRecordsSuccess()
     {
         var services = new ServiceCollection();
-        services.AddSingleton(NullLoggerFactory.Instance);
         services.AddLogging();
         services.AddSyncLibrary();
-        services.AddSyncProvider<FakeDto, FakeEntity>("fake")
-            .WithConfiguration(new ProviderSyncConfiguration
-            {
-                ProviderName = "fake",
-                SyncInterval = TimeSpan.FromHours(1),
-                MaxRetryAttempts = 0
-            })
-            .WithDataProvider<FakeDataProvider>()
-            .WithRepository<FakeRepository>()
-            .WithMapper<FakeMapper>()
+        services.AddSingleton<IFakeClient, FakeClient>();
+        services.AddSyncStream<IFakeClient, FakeDto>(FakeKey.ProviderName, FakeKey.StreamName)
+            .WithFetch((c, since, ct) => c.FetchAsync(since, ct))
+            .HandledBy<FakeHandler>()
+            .Configure(c => c.MaxRetryAttempts = 0)
             .Build();
+        services.AddScoped<FakeHandler>();
 
         await using var sp = services.BuildServiceProvider();
         var orch = sp.GetRequiredService<ISyncOrchestrator>();
 
-        await orch.TriggerManualSyncAsync("fake");
+        await orch.TriggerManualSyncAsync(FakeKey);
 
-        var state = await sp.GetRequiredService<ISyncStateReader>().GetAsync("fake");
+        var state = await sp.GetRequiredService<ISyncStateReader>().GetAsync(FakeKey);
         Assert.NotNull(state);
         Assert.Equal(SyncStatus.Succeeded, state!.LastStatus);
         Assert.Equal(3, state.LastRecordCount);
@@ -46,23 +43,22 @@ public class SyncOrchestratorTests
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddSyncLibrary();
-        services.AddSyncProvider<FakeDto, FakeEntity>("flaky")
-            .WithConfiguration(new ProviderSyncConfiguration
+        services.AddSingleton<IFlakyClient, FlakyClient>();
+        services.AddSyncStream<IFlakyClient, FakeDto>(FlakyKey.ProviderName, FlakyKey.StreamName)
+            .WithFetch((c, since, ct) => c.FetchAsync(since, ct))
+            .HandledBy<FakeHandler>()
+            .Configure(c =>
             {
-                ProviderName = "flaky",
-                SyncInterval = TimeSpan.FromHours(1),
-                MaxRetryAttempts = 2,
-                RetryDelayBase = TimeSpan.FromMilliseconds(1)
+                c.MaxRetryAttempts = 2;
+                c.RetryDelayBase = TimeSpan.FromMilliseconds(1);
             })
-            .WithDataProvider<FlakyProvider>()
-            .WithRepository<FakeRepository>()
-            .WithMapper<FakeMapper>()
             .Build();
+        services.AddScoped<FakeHandler>();
 
         await using var sp = services.BuildServiceProvider();
-        await sp.GetRequiredService<ISyncOrchestrator>().TriggerManualSyncAsync("flaky");
+        await sp.GetRequiredService<ISyncOrchestrator>().TriggerManualSyncAsync(FlakyKey);
 
-        var state = await sp.GetRequiredService<ISyncStateReader>().GetAsync("flaky");
+        var state = await sp.GetRequiredService<ISyncStateReader>().GetAsync(FlakyKey);
         Assert.Equal(SyncStatus.Succeeded, state!.LastStatus);
     }
 
@@ -72,70 +68,103 @@ public class SyncOrchestratorTests
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddSyncLibrary();
-        services.AddSyncProvider<FakeDto, FakeEntity>("broken")
-            .WithConfiguration(new ProviderSyncConfiguration
+        services.AddSingleton<IBrokenClient, BrokenClient>();
+        services.AddSyncStream<IBrokenClient, FakeDto>(BrokenKey.ProviderName, BrokenKey.StreamName)
+            .WithFetch((c, since, ct) => c.FetchAsync(since, ct))
+            .HandledBy<FakeHandler>()
+            .Configure(c =>
             {
-                ProviderName = "broken",
-                SyncInterval = TimeSpan.FromHours(1),
-                MaxRetryAttempts = 1,
-                RetryDelayBase = TimeSpan.FromMilliseconds(1),
-                EnableCircuitBreaker = false
+                c.MaxRetryAttempts = 1;
+                c.RetryDelayBase = TimeSpan.FromMilliseconds(1);
+                c.EnableCircuitBreaker = false;
             })
-            .WithDataProvider<AlwaysFailsProvider>()
-            .WithRepository<FakeRepository>()
-            .WithMapper<FakeMapper>()
             .Build();
+        services.AddScoped<FakeHandler>();
 
         await using var sp = services.BuildServiceProvider();
-        await sp.GetRequiredService<ISyncOrchestrator>().TriggerManualSyncAsync("broken");
+        await sp.GetRequiredService<ISyncOrchestrator>().TriggerManualSyncAsync(BrokenKey);
 
-        var state = await sp.GetRequiredService<ISyncStateReader>().GetAsync("broken");
+        var state = await sp.GetRequiredService<ISyncStateReader>().GetAsync(BrokenKey);
         Assert.Equal(SyncStatus.Failed, state!.LastStatus);
         Assert.Equal(1, state.TotalFailures);
         Assert.NotNull(state.LastError);
     }
 
     [Fact]
-    public async Task RunAllAsync_RunsEveryProvider_AndAggregatesOutcomes()
+    public async Task RunAllAsync_RunsEveryStream_AndAggregatesOutcomes()
     {
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddSyncRunner();
+        services.AddSingleton<IFakeClient, FakeClient>();
+        services.AddSingleton<IBrokenClient, BrokenClient>();
 
-        services.AddSyncProvider<FakeDto, FakeEntity>("ok")
-            .WithConfiguration(new ProviderSyncConfiguration { ProviderName = "ok", MaxRetryAttempts = 0 })
-            .WithDataProvider<FakeDataProvider>()
-            .WithRepository<FakeRepository>()
-            .WithMapper<FakeMapper>()
+        services.AddSyncStream<IFakeClient, FakeDto>("ok", "default")
+            .WithFetch((c, since, ct) => c.FetchAsync(since, ct))
+            .HandledBy<FakeHandler>()
+            .Configure(c => c.MaxRetryAttempts = 0)
             .Build();
 
-        services.AddSyncProvider<OtherDto, OtherEntity>("bad")
-            .WithConfiguration(new ProviderSyncConfiguration
+        services.AddSyncStream<IBrokenClient, OtherDto>("bad", "default")
+            .WithFetch((c, since, ct) => c.FetchOtherAsync(since, ct))
+            .HandledBy<OtherHandler>()
+            .Configure(c =>
             {
-                ProviderName = "bad",
-                MaxRetryAttempts = 0,
-                EnableCircuitBreaker = false,
-                RetryDelayBase = TimeSpan.FromMilliseconds(1)
+                c.MaxRetryAttempts = 0;
+                c.EnableCircuitBreaker = false;
+                c.RetryDelayBase = TimeSpan.FromMilliseconds(1);
             })
-            .WithDataProvider<AlwaysFailsOtherProvider>()
-            .WithRepository<OtherRepository>()
-            .WithMapper<OtherMapper>()
             .Build();
+
+        services.AddScoped<FakeHandler>();
+        services.AddScoped<OtherHandler>();
 
         await using var sp = services.BuildServiceProvider();
         var runner = sp.GetRequiredService<ISyncRunner>();
 
         var summary = await runner.RunAllAsync();
 
-        Assert.Equal(2, summary.TotalProviders);
+        Assert.Equal(2, summary.TotalStreams);
         Assert.Equal(1, summary.Succeeded);
         Assert.Equal(1, summary.Failed);
         Assert.False(summary.IsHealthy);
-        Assert.Contains("bad", summary.ProviderErrors.Keys);
+        Assert.Contains(new SyncStateKey("bad", "default"), summary.StreamErrors.Keys);
     }
 
     [Fact]
-    public async Task TriggerManualSync_Throws_ForUnknownProvider()
+    public async Task RunProviderAsync_OnlyRunsStreamsForOneProvider()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSyncRunner();
+        services.AddSingleton<IFakeClient, FakeClient>();
+
+        services.AddSyncStream<IFakeClient, FakeDto>("weather", "forecasts")
+            .WithFetch((c, since, ct) => c.FetchAsync(since, ct))
+            .HandledBy<FakeHandler>()
+            .Configure(c => c.MaxRetryAttempts = 0)
+            .Build();
+
+        services.AddSyncStream<IFakeClient, FakeDto>("traffic", "incidents")
+            .WithFetch((c, since, ct) => c.FetchAsync(since, ct))
+            .HandledBy<FakeHandler>()
+            .Configure(c => c.MaxRetryAttempts = 0)
+            .Build();
+
+        services.AddScoped<FakeHandler>();
+
+        await using var sp = services.BuildServiceProvider();
+        var summary = await sp.GetRequiredService<ISyncRunner>().RunProviderAsync("weather");
+
+        Assert.Equal(1, summary.TotalStreams);
+        Assert.Equal(1, summary.Succeeded);
+
+        var all = await sp.GetRequiredService<ISyncStateReader>().GetAllAsync();
+        Assert.Single(all); // only the "weather" stream ran
+    }
+
+    [Fact]
+    public async Task TriggerManualSync_Throws_ForUnknownStream()
     {
         var services = new ServiceCollection();
         services.AddLogging();
@@ -144,95 +173,64 @@ public class SyncOrchestratorTests
         await using var sp = services.BuildServiceProvider();
         var orch = sp.GetRequiredService<ISyncOrchestrator>();
 
-        await Assert.ThrowsAsync<ArgumentException>(() => orch.TriggerManualSyncAsync("nope"));
+        await Assert.ThrowsAsync<ArgumentException>(() => orch.TriggerManualSyncAsync(new SyncStateKey("nope", "default")));
     }
 
     // ---- Test doubles --------------------------------------------------
 
     public sealed record FakeDto(int N);
+    public sealed record OtherDto(string S);
 
-    public sealed class FakeEntity : IEntity
+    public interface IFakeClient
     {
-        public Guid Id { get; set; }
-        public int N { get; set; }
-        public DateTime CreatedAt { get; set; }
-        public DateTime? UpdatedAt { get; set; }
+        Task<IReadOnlyCollection<FakeDto>> FetchAsync(DateTime? since, CancellationToken cancellationToken);
     }
 
-    private sealed class FakeDataProvider : ISyncDataProvider<FakeDto>
+    public interface IFlakyClient
     {
-        public string ProviderName => "fake";
-        public Task<IReadOnlyCollection<FakeDto>> FetchDataAsync(CancellationToken cancellationToken = default) =>
+        Task<IReadOnlyCollection<FakeDto>> FetchAsync(DateTime? since, CancellationToken cancellationToken);
+    }
+
+    public interface IBrokenClient
+    {
+        Task<IReadOnlyCollection<FakeDto>> FetchAsync(DateTime? since, CancellationToken cancellationToken);
+        Task<IReadOnlyCollection<OtherDto>> FetchOtherAsync(DateTime? since, CancellationToken cancellationToken);
+    }
+
+    private sealed class FakeClient : IFakeClient
+    {
+        public Task<IReadOnlyCollection<FakeDto>> FetchAsync(DateTime? since, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyCollection<FakeDto>>(new[] { new FakeDto(1), new FakeDto(2), new FakeDto(3) });
-        public Task<IReadOnlyCollection<FakeDto>> FetchDataAsync(DateTime? lastSyncTime, CancellationToken cancellationToken = default) =>
-            FetchDataAsync(cancellationToken);
     }
 
-    private sealed class FlakyProvider : ISyncDataProvider<FakeDto>
+    private sealed class FlakyClient : IFlakyClient
     {
         private int _calls;
-        public string ProviderName => "flaky";
-        public Task<IReadOnlyCollection<FakeDto>> FetchDataAsync(CancellationToken cancellationToken = default)
+        public Task<IReadOnlyCollection<FakeDto>> FetchAsync(DateTime? since, CancellationToken cancellationToken)
         {
             _calls++;
             if (_calls < 2) throw new InvalidOperationException("transient");
             return Task.FromResult<IReadOnlyCollection<FakeDto>>(new[] { new FakeDto(1) });
         }
-        public Task<IReadOnlyCollection<FakeDto>> FetchDataAsync(DateTime? lastSyncTime, CancellationToken cancellationToken = default) =>
-            FetchDataAsync(cancellationToken);
     }
 
-    private sealed class AlwaysFailsProvider : ISyncDataProvider<FakeDto>
+    private sealed class BrokenClient : IBrokenClient
     {
-        public string ProviderName => "broken";
-        public Task<IReadOnlyCollection<FakeDto>> FetchDataAsync(CancellationToken cancellationToken = default) =>
+        public Task<IReadOnlyCollection<FakeDto>> FetchAsync(DateTime? since, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("nope");
-        public Task<IReadOnlyCollection<FakeDto>> FetchDataAsync(DateTime? lastSyncTime, CancellationToken cancellationToken = default) =>
+        public Task<IReadOnlyCollection<OtherDto>> FetchOtherAsync(DateTime? since, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("nope");
     }
 
-    private sealed class FakeRepository : ISyncRepository<FakeEntity>
+    private sealed class FakeHandler : ISyncDataHandler<FakeDto>
     {
-        public Task AddOrUpdateBatchAsync(IEnumerable<FakeEntity> entities, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task<int> GetCountAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
-        public Task ClearOldDataAsync(DateTime olderThan, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task HandleAsync(SyncContext context, IReadOnlyCollection<FakeDto> data, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
     }
 
-    private sealed class FakeMapper : ISyncMapper<FakeDto, FakeEntity>
+    private sealed class OtherHandler : ISyncDataHandler<OtherDto>
     {
-        public FakeEntity MapToEntity(FakeDto data) => new() { Id = Guid.NewGuid(), N = data.N };
-        public IReadOnlyCollection<FakeEntity> MapToEntities(IEnumerable<FakeDto> data) => data.Select(MapToEntity).ToArray();
-    }
-
-    public sealed record OtherDto(string S);
-
-    public sealed class OtherEntity : IEntity
-    {
-        public Guid Id { get; set; }
-        public string S { get; set; } = "";
-        public DateTime CreatedAt { get; set; }
-        public DateTime? UpdatedAt { get; set; }
-    }
-
-    private sealed class AlwaysFailsOtherProvider : ISyncDataProvider<OtherDto>
-    {
-        public string ProviderName => "bad";
-        public Task<IReadOnlyCollection<OtherDto>> FetchDataAsync(CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("nope");
-        public Task<IReadOnlyCollection<OtherDto>> FetchDataAsync(DateTime? lastSyncTime, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("nope");
-    }
-
-    private sealed class OtherRepository : ISyncRepository<OtherEntity>
-    {
-        public Task AddOrUpdateBatchAsync(IEnumerable<OtherEntity> entities, CancellationToken cancellationToken = default) => Task.CompletedTask;
-        public Task<int> GetCountAsync(CancellationToken cancellationToken = default) => Task.FromResult(0);
-        public Task ClearOldDataAsync(DateTime olderThan, CancellationToken cancellationToken = default) => Task.CompletedTask;
-    }
-
-    private sealed class OtherMapper : ISyncMapper<OtherDto, OtherEntity>
-    {
-        public OtherEntity MapToEntity(OtherDto data) => new() { Id = Guid.NewGuid(), S = data.S };
-        public IReadOnlyCollection<OtherEntity> MapToEntities(IEnumerable<OtherDto> data) => data.Select(MapToEntity).ToArray();
+        public Task HandleAsync(SyncContext context, IReadOnlyCollection<OtherDto> data, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
     }
 }

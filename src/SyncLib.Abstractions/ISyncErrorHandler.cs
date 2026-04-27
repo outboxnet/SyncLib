@@ -7,8 +7,8 @@ namespace SyncLib.Abstractions;
 public interface ISyncErrorHandler
 {
     /// <summary>Called once per failed attempt (including intermediate retries).</summary>
-    Task OnSyncErrorAsync(string providerName, Exception exception, int retryCount, CancellationToken cancellationToken = default);
+    Task OnSyncErrorAsync(SyncStateKey key, Exception exception, int retryCount, CancellationToken cancellationToken = default);
 
     /// <summary>Called once per successful run.</summary>
-    Task OnSyncSuccessAsync(string providerName, int recordsSynced, TimeSpan duration, CancellationToken cancellationToken = default);
+    Task OnSyncSuccessAsync(SyncStateKey key, int recordsSynced, TimeSpan duration, CancellationToken cancellationToken = default);
 }
