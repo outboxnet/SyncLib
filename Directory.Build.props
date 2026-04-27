@@ -35,12 +35,7 @@
     <VersionPrefix>0.1.0</VersionPrefix>
   </PropertyGroup>
 
-  <!-- Pack the solution README into every package -->
-  <ItemGroup Condition="'$(IsPackable)' == 'true'">
-    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
-  </ItemGroup>
-
- <ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
   </ItemGroup>
 
