@@ -12,13 +12,13 @@
 
   <!-- Shared NuGet package metadata -->
   <PropertyGroup>
-    <Authors>SyncLib Contributors</Authors>
-    <Company>SyncLib</Company>
-    <Product>SyncLib</Product>
-    <Copyright>Copyright (c) SyncLib Contributors</Copyright>
+    <Authors>Lőrinc Sándor</Authors>
+    <Company>Dragonfire</Company>
+    <Product>Dragonfire</Product>
+    <Copyright>Copyright (c) Lőrinc Sándor</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/outboxnet/SyncLib</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/outboxnet/SyncLib</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/outboxnet/Dragonfire</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/outboxnet/Dragonfire.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>sync;synchronization;background-job;ef-core;observability</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>

@@ -1,5 +1,7 @@
 # SyncLib
 
+> **This package has moved.** The Dragonfire suite is now developed in a single repository: [`outboxnet/Dragonfire`](https://github.com/outboxnet/Dragonfire). Visit it for the latest version and the full suite of packages.
+
 A small, opinionated library for running scheduled data-synchronization jobs in
 .NET hosted apps. Each *provider* fetches data from somewhere (HTTP API,
 queue, file system, …), maps it to your domain entities, and persists it
